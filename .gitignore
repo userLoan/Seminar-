@@ -3,3 +3,7 @@
 /notebooks/runs/
 
 
+/data/SP100/processed/
+
+!/data/SP100/processed/
+!/data/SP100/processed/README.md

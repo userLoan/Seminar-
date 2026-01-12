@@ -1,3 +1,4 @@
+
 import sys
 from pathlib import Path
 import subprocess
@@ -18,9 +19,6 @@ def find_repo_root(start: Path) -> Path:
 REPO_ROOT = find_repo_root(Path.cwd())
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-NOTEBOOKS_ROOT = REPO_ROOT / "notebooks"
-if NOTEBOOKS_ROOT.exists() and str(NOTEBOOKS_ROOT) not in sys.path:
-    sys.path.insert(0, str(NOTEBOOKS_ROOT))
 
 st.set_page_config(page_title="SP100 – Optimal Portfolio Selection (TGCN)", layout="wide")
 
@@ -31,34 +29,12 @@ def _safe_imports():
     try:
         from datasets.SP100Stocks import SP100Stocks  # type: ignore
     except Exception as e:
-    SP100Stocks = None
-    tried_dataset = []
-    for mod in ["datasets.SP100Stocks", "notebooks.datasets.SP100Stocks"]:
-        try:
-            m = __import__(mod, fromlist=["SP100Stocks"])
-            if hasattr(m, "SP100Stocks"):
-                SP100Stocks = getattr(m, "SP100Stocks")
-                break
-            tried_dataset.append(f"{mod}.SP100Stocks (symbol not found)")
-        except Exception as e:
-            tried_dataset.append(f"{mod}.SP100Stocks ({e})")
-
-    if SP100Stocks is None:
         st.error(
             "Không import được `datasets.SP100Stocks`.\n\n"
-            "Không import được `SP100Stocks`.\n\n"
             "Lý do thường gặp:\n"
             "- Bạn chưa chạy pipeline notebooks để tạo dữ liệu trong `data/SP100/raw/`.\n"
             "- Hoặc bạn chạy app không ở repo root.\n\n"
             f"Lỗi chi tiết: {e}"
-            "- `datasets.SP100Stocks` chỉ được tạo sau khi bạn chạy 3 notebooks pipeline:\n"
-            "  1) notebooks/1-data_collection_and_preprocessing.ipynb\n"
-            "  2) notebooks/2-graph_creation.ipynb\n"
-            "  3) notebooks/3-torch_geometric_dataset.ipynb\n"
-            "  (các notebooks này tạo dữ liệu trong `data/SP100/raw/`).\n"
-            "- Hoặc bạn chạy app không ở repo root.\n"
-            "- Module nằm trong `notebooks/datasets/SP100Stocks.py`.\n\n"
-            "Đã thử:\n- " + "\n- ".join(tried_dataset[:6])
         )
         st.stop()
 
@@ -84,7 +60,182 @@ def _safe_imports():
         )
         st.stop()
 
-@@ -239,157 +257,174 @@ def run_backtest(dataset, model, tickers: list[str], topks: list[int], largest:
+    return SP100Stocks, TGCN
+
+
+# ---------------------------
+# Pipeline checks & runner
+# ---------------------------
+RAW_DIR = REPO_ROOT / "data" / "SP100" / "raw"
+REQUIRED_FILES = {
+    "stocks.csv": RAW_DIR / "stocks.csv",
+    "fundamentals.csv": RAW_DIR / "fundamentals.csv",
+    "values.csv": RAW_DIR / "values.csv",
+    "adj.npy": RAW_DIR / "adj.npy",
+}
+
+def missing_raw_files() -> list[str]:
+    missing = []
+    for name, p in REQUIRED_FILES.items():
+        if not p.exists():
+            missing.append(str(p))
+    return missing
+
+def find_notebook(patterns: list[str]) -> Path | None:
+    nb_dir = REPO_ROOT / "notebooks"
+    if not nb_dir.exists():
+        return None
+    cands = list(nb_dir.glob("*.ipynb"))
+    # prioritize exact prefix matches (e.g., "1-", "2-", "3-")
+    for pref in patterns:
+        for p in cands:
+            if p.name.startswith(pref):
+                return p
+    # fallback: keyword match
+    for kw in patterns:
+        kw_low = kw.lower()
+        for p in cands:
+            if kw_low in p.name.lower():
+                return p
+    return None
+
+def run_nb(nb_path: Path) -> tuple[int, str]:
+    """
+    Execute a notebook in-place using nbconvert.
+    Returns (returncode, combined_output).
+    """
+    cmd = [
+        sys.executable, "-m", "jupyter", "nbconvert",
+        "--to", "notebook",
+        "--execute",
+        "--ExecutePreprocessor.timeout=0",
+        str(nb_path),
+        "--output", nb_path.name.replace(".ipynb", ".executed.ipynb"),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    return proc.returncode, out
+
+def run_pipeline():
+    """
+    Run notebooks 1 -> 2 -> 3 sequentially.
+    This matches the dependency chain:
+    1 creates raw csv; 2 creates adj.npy; 3 validates/creates dataset objects.
+    """
+    nb1 = find_notebook(["1-", "data_collection", "preprocessing"])
+    nb2 = find_notebook(["2-", "graph_creation", "graph"])
+    nb3 = find_notebook(["3-", "torch_geometric_dataset", "dataset"])
+
+    if nb1 is None or nb2 is None or nb3 is None:
+        st.error(
+            "Không tìm thấy đủ 3 notebooks trong thư mục `notebooks/`.\n\n"
+            "Yêu cầu:\n"
+            "- 1-data_collection_and_preprocessing.ipynb\n"
+            "- 2-graph_creation.ipynb\n"
+            "- 3-torch_geometric_dataset.ipynb\n\n"
+            "Hãy kiểm tra bạn đang chạy app ở repo root và các notebook nằm đúng vị trí."
+        )
+        st.stop()
+
+    logs = []
+    for nb in [nb1, nb2, nb3]:
+        code, out = run_nb(nb)
+        logs.append((nb.name, code, out))
+        if code != 0:
+            return False, logs
+    return True, logs
+
+
+# ---------------------------
+# Portfolio logic (same as notebook 9)
+# ---------------------------
+def get_topk(model_out, k: int, largest: bool = True):
+    import torch
+    return torch.topk(model_out, k, largest=largest).indices
+
+def compute_performance(cum_curve: list[float], periods_per_year: int = 52) -> dict:
+    arr = np.asarray(cum_curve, dtype=float)
+    if len(arr) < 2:
+        return {}
+    rets = arr[1:] / arr[:-1] - 1.0
+    mean = rets.mean()
+    std = rets.std(ddof=1) if len(rets) > 1 else 0.0
+    sharpe = (np.sqrt(periods_per_year) * mean / std) if std > 0 else np.nan
+    peak = np.maximum.accumulate(arr)
+    dd = arr / peak - 1.0
+    mdd = dd.min()
+    total_return = arr[-1] - 1.0
+    years = (len(arr) - 1) / periods_per_year
+    cagr = (arr[-1] ** (1 / years) - 1.0) if years > 0 else np.nan
+    return {
+        "Total Return": total_return,
+        "CAGR": cagr,
+        "Sharpe": sharpe,
+        "Volatility": std * np.sqrt(periods_per_year),
+        "Max Drawdown": mdd,
+        "Periods": len(arr) - 1,
+    }
+
+@st.cache_resource(show_spinner=False)
+def load_dataset_cached(weeks_ahead: int):
+    SP100Stocks, _ = _safe_imports()
+    return SP100Stocks(future_window=weeks_ahead * 5)
+
+@st.cache_resource(show_spinner=False)
+def load_model_cached(in_channels: int, out_channels: int, hidden_size: int, layers_nb: int, ckpt_bytes: bytes | None, ckpt_path: str | None):
+    import torch
+    _, TGCN = _safe_imports()
+    model = TGCN(in_channels, out_channels, hidden_size, layers_nb)
+
+    if ckpt_bytes is not None:
+        tmp = Path(".streamlit_tmp_ckpt.pt")
+        tmp.write_bytes(ckpt_bytes)
+        state = torch.load(tmp, map_location="cpu")
+    elif ckpt_path is not None:
+        state = torch.load(ckpt_path, map_location="cpu")
+    else:
+        raise ValueError("Missing checkpoint.")
+
+    model.load_state_dict(state)
+    model.eval()
+    return model
+
+def find_checkpoints(repo_root: Path) -> list[str]:
+    dirs = [
+        repo_root / "notebooks" / "models" / "saved_models",
+        repo_root / "models" / "saved_models",
+    ]
+    ckpts = []
+    for d in dirs:
+        if d.exists():
+            ckpts.extend([str(p) for p in d.glob("*.pt")])
+    return sorted(set(ckpts))
+
+def try_get_tickers(dataset) -> list[str]:
+    for attr in ["symbols", "tickers", "tickers_list", "stock_symbols", "stocks"]:
+        if hasattr(dataset, attr):
+            v = getattr(dataset, attr)
+            if isinstance(v, (list, tuple)) and v and isinstance(v[0], str):
+                return list(v)
+    return []
+
+def run_backtest(dataset, model, tickers: list[str], topks: list[int], largest: bool, train_part: float, step_days: int = 5):
+    import torch
+    test_data = dataset[int(len(dataset) * train_part):]
+    test_data = [test_data[idx] for idx in range(0, len(test_data), step_days)]
+    if len(test_data) < 2:
+        raise RuntimeError("Test segment quá ngắn. Hãy tăng dữ liệu hoặc giảm train_part.")
+
+    portfolio_curves = [[1.0] for _ in topks]
+    market_curve = [1.0]
+    selections = {k: [] for k in topks}
+
+    with torch.no_grad():
+        model_out = model(test_data[0].x, test_data[0].edge_index, test_data[0].edge_weight).squeeze(1)
+    last_close = test_data[0].close_price[:, -1]
+
+    for t in range(1, len(test_data)):
+        close_now = test_data[t].close_price[:, -1]
         period_returns = close_now / last_close
 
         for j, k in enumerate(topks):
@@ -111,18 +262,6 @@ def _safe_imports():
 # UI
 # ---------------------------
 st.title("SP100 – Optimal Portfolio Selection (Streamlit)")
-st.title("SP100 – Optimal Portfolio Selection")
-st.markdown(
-    """
-Ứng dụng này triển khai lại notebook
-`notebooks/9-optimal_portfolio_selection.ipynb` bằng Streamlit:
-
-- Load dữ liệu SP100 từ `datasets.SP100Stocks`
-- Load mô hình TGCN đã train
-- Chọn top‑k cổ phiếu theo output của mô hình
-- So sánh performance với market return
-"""
-)
 
 missing = missing_raw_files()
 if missing:
@@ -163,7 +302,6 @@ with st.sidebar:
     topks_txt = st.text_input("Top‑K list", value="5,10,20")
     try:
         topks = sorted({int(x.strip()) for x in topks_txt.split(",") if x.strip()})
-        topks = sorted({int(x.strip()) for x in topks_txt.split(",") if x.strip() and int(x.strip()) > 0})
         if not topks:
             raise ValueError()
     except Exception:
@@ -213,22 +351,6 @@ try:
 except Exception:
     st.info("Không đọc được dataset shape (schema có thể khác).")
 
-def plot_curves(curves, market_curve, topks, step_days):
-    fig, ax = plt.subplots(figsize=(12, 5))
-    for j, k in enumerate(topks):
-        ax.plot(curves[j], label=f"Top-{k}", linestyle=["--", "-.", ":"][j % 3])
-    ax.plot(market_curve, label="Market", linewidth=3)
-    ax.grid(which="major", linestyle="-", linewidth=0.5)
-    ax.minorticks_on()
-    ax.grid(which="minor", linestyle="--", linewidth=0.5, alpha=0.4)
-    ax.set_title("Market return vs Portfolio (top‑k)")
-    ax.set_xlabel("Weeks" if step_days == 5 else "Periods")
-    ax.set_ylabel("Return")
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{(x - 1) * 100:.0f}%"))
-    ax.legend()
-    return fig
-
-
 if run_btn:
     if ckpt_path is None and ckpt_bytes is None:
         st.error("Chọn hoặc upload checkpoint trước khi chạy.")
@@ -257,7 +379,6 @@ if run_btn:
     ax.set_xlabel("Periods")
     ax.set_ylabel("Cumulative return")
     ax.legend()
-    fig = plot_curves(curves, market, topks, int(step_days))
     st.pyplot(fig, clear_figure=True)
 
     st.subheader("Metrics")

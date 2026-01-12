@@ -1,3 +1,5 @@
+import sys
+from pathlib import Path
 import subprocess
 import numpy as np
 import pandas as pd
@@ -16,6 +18,9 @@ def find_repo_root(start: Path) -> Path:
 REPO_ROOT = find_repo_root(Path.cwd())
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+NOTEBOOKS_ROOT = REPO_ROOT / "notebooks"
+if NOTEBOOKS_ROOT.exists() and str(NOTEBOOKS_ROOT) not in sys.path:
+    sys.path.insert(0, str(NOTEBOOKS_ROOT))
 
 st.set_page_config(page_title="SP100 – Optimal Portfolio Selection (TGCN)", layout="wide")
 
@@ -46,7 +51,11 @@ def _safe_imports():
             "- Bạn chưa chạy pipeline notebooks để tạo dữ liệu trong `data/SP100/raw/`.\n"
             "- Hoặc bạn chạy app không ở repo root.\n\n"
             f"Lỗi chi tiết: {e}"
-            "- Bạn chưa chạy 3 notebooks để tạo dữ liệu trong `data/SP100/raw/`.\n"
+            "- `datasets.SP100Stocks` chỉ được tạo sau khi bạn chạy 3 notebooks pipeline:\n"
+            "  1) notebooks/1-data_collection_and_preprocessing.ipynb\n"
+            "  2) notebooks/2-graph_creation.ipynb\n"
+            "  3) notebooks/3-torch_geometric_dataset.ipynb\n"
+            "  (các notebooks này tạo dữ liệu trong `data/SP100/raw/`).\n"
             "- Hoặc bạn chạy app không ở repo root.\n"
             "- Module nằm trong `notebooks/datasets/SP100Stocks.py`.\n\n"
             "Đã thử:\n- " + "\n- ".join(tried_dataset[:6])
@@ -75,7 +84,7 @@ def _safe_imports():
         )
         st.stop()
 
-@@ -239,157 +250,174 @@ def run_backtest(dataset, model, tickers: list[str], topks: list[int], largest:
+@@ -239,157 +257,174 @@ def run_backtest(dataset, model, tickers: list[str], topks: list[int], largest:
         period_returns = close_now / last_close
 
         for j, k in enumerate(topks):

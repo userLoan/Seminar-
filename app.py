@@ -26,7 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # Optional: make Streamlit reload friendlier
-st.set_page_config(page_title="SP100 – Optimal Portfolio Selection (TGCN)", layout="wide")
+st.set_page_config(page_title="Optimal Portfolio Selection", layout="wide")
 
 # ---------------------------
 # Helper functions
@@ -206,8 +206,7 @@ def run_backtest(dataset, model, tickers: list[str], topks: list[int], largest: 
 # ---------------------------
 # UI
 # ---------------------------
-st.title("SP100 – Optimal Portfolio Selection (Streamlit)")
-st.caption("Dashboard này đóng gói logic từ notebook `9-optimal_portfolio_selection.ipynb`: dùng TGCN để chọn Top‑K cổ phiếu và so sánh cumulative return với market.")
+st.title("Optimal Portfolio Selection")
 
 with st.sidebar:
     st.header("Cấu hình")

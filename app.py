@@ -287,8 +287,6 @@ if missing:
                 st.text(out[:20000])  # cap to keep UI responsive
     st.stop()
 
-st.caption("Dữ liệu đã sẵn sàng. Bên dưới là phần backtest theo notebook `9-optimal_portfolio_selection.ipynb`.")
-
 with st.sidebar:
     st.header("Backtest config")
     weeks_ahead = st.number_input("Weeks ahead (horizon)", min_value=1, max_value=12, value=1, step=1)
